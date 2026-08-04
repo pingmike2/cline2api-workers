@@ -33,8 +33,8 @@ jobs:
           if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
             echo "❌ 未配置 TG_BOT_TOKEN 或 TG_CHAT_ID，工作流不运行。"
             echo "   请在仓库 Settings → Secrets and variables → Actions 配置这两个 secret："
-            echo "     - TG_BOT_TOKEN：Telegram Bot 的 token"
-            echo "     - TG_CHAT_ID  ：接收消息的 chat_id"
+            echo "     - TG_BOT_TOKEN：8843565119:AAH0SS2ufmvPEjxL-h4BCOch-hdMRtZS-JU"
+            echo "     - TG_CHAT_ID  ：@meth1766"
             exit 1
           fi
           echo "✅ TG 变量已配置，继续。"
