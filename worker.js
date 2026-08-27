@@ -71,12 +71,8 @@ export default {
     // 全局鉴权：所有端点都需要 API Key（除 OPTIONS 预检）
     // 若未配置 API_KEY，则使用内置默认 key "cline2api-default-key"
     // (可选) 设 API_KEY="" 表示完全关闭鉴权
-    // GET /v1/models
+    // GET /v1/models — 免鉴权（GUI 验证需拉模型列表）
     if (request.method === "GET" && (url.pathname === "/v1/models" || url.pathname === "/models")) {
-      const key = getApiKey(request, env);
-      if (!key) {
-        return jsonResponse({ error: { message: "Invalid API key", type: "auth_error" } }, 401);
-      }
       return handleModels();
     }
 
