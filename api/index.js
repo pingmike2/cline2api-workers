@@ -64,13 +64,31 @@ async function refreshModels() {
     if (!data || !Array.isArray(data.data) || data.data.length === 0) {
       return MODELS;
     }
-    // 映射为内置格式: id=upstream=官方id, provider=前缀, cost 通过 :free 判断
-    modelsCache = data.data.map((m) => {
-      const id = m.id || "";
-      const prefix = id.split("/")[0] || "cline";
-      const cost = id.includes(":free") ? "free" : (id.startsWith("cline-pass/") ? "pass" : "free");
-      return { id, upstream: id, provider: prefix, cost };
-    });
+    // 只保留免费模型: :free 后缀 + Cline 官方免费白名单 (2026-08-29)
+    const FREE_WHITELIST = [
+      "deepseek/deepseek-v4-flash",
+      "deepseek/deepseek-v4-flash-0731",
+      "z-ai/glm-5.3-flash",
+      "z-ai/glm-5.2:free",
+      "xiaomi/mimo-v2.5",
+      "minimax/minimax-m3",
+      "poolside/laguna-s-2.1",
+    ];
+    modelsCache = data.data
+      .filter((m) => {
+        const id = m.id || "";
+        if (":batch" in m && m.batch) return false;
+        if (id.endsWith(":batch")) return false;
+        if (id.includes(":free")) return true;
+        if (FREE_WHITELIST.includes(id)) return true;
+        return false;
+      })
+      .map((m) => {
+        const id = m.id || "";
+        const prefix = id.split("/")[0] || "cline";
+        const cost = id.includes(":free") ? "free" : "free";
+        return { id, upstream: id, provider: prefix, cost };
+      });
     modelsCacheTime = now;
     console.log("[models] 动态拉取成功:", modelsCache.length, "个模型");
     return modelsCache;
