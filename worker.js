@@ -40,6 +40,47 @@ const MODELS = [
   { id: "zai/glm-5.3-flash", upstream: "zai/glm-5.3-flash", provider: "zai", cost: "free" },
 ];
 
+// ============ 动态模型列表 (2026-08-29) ============
+// 优先从 Cline 官方 /v1/models 拉取, 失败回退到上面内置列表。
+// 每 10 分钟刷新一次缓存。
+let modelsCache = null;
+let modelsCacheTime = 0;
+const MODELS_TTL = 10 * 60 * 1000; // 10 分钟
+
+async function refreshModels() {
+  try {
+    const now = Date.now();
+    if (modelsCache && now - modelsCacheTime < MODELS_TTL) {
+      return modelsCache;
+    }
+    const resp = await fetch(CLINE_API_BASE + "/models", {
+      headers: { "User-Agent": "Mozilla/5.0 (cline2api)" },
+    });
+    if (!resp.ok) {
+      console.log("[models] 官方拉取失败 HTTP", resp.status, "回退内置列表");
+      return MODELS;
+    }
+    const data = await resp.json();
+    if (!data || !Array.isArray(data.data) || data.data.length === 0) {
+      return MODELS;
+    }
+    // 映射为内置格式: id=upstream=官方id, provider=前缀, cost 通过 :free 判断
+    modelsCache = data.data.map((m) => {
+      const id = m.id || "";
+      const prefix = id.split("/")[0] || "cline";
+      const cost = id.includes(":free") ? "free" : (id.startsWith("cline-pass/") ? "pass" : "free");
+      return { id, upstream: id, provider: prefix, cost };
+    });
+    modelsCacheTime = now;
+    console.log("[models] 动态拉取成功:", modelsCache.length, "个模型");
+    return modelsCache;
+  } catch (e) {
+    console.log("[models] 拉取异常:", String(e).slice(0, 100), "回退内置列表");
+    return MODELS;
+  }
+}
+
+
 // 默认模型：Cline 免费 DeepSeek 通道（完整头 + 强制 stream 已修复）
 const DEFAULT_MODEL = "deepseek/deepseek-v4-flash";
 const VERSION = "1.1.6";
@@ -367,7 +408,7 @@ async function handleChat(request, env) {
   const isStream = !!params.stream;
   const sessionId = "sess_" + Date.now();
   const model = params.model || DEFAULT_MODEL;
-  const modelConfig = MODELS.find((m) => m.id === model);
+  const modelConfig = (await refreshModels()).find((m) => m.id === model);
   const upstreamModel = modelConfig?.upstream || model;
 
   // 构造上游 body（外部模型 ID 与 Cline 上游模型 ID 分离）
@@ -558,7 +599,7 @@ async function handleAnthropic(request, env) {
   const isStream = !!req.stream;
   const sessionId = "sess_" + Date.now();
   const requestedModel = req.model || DEFAULT_MODEL;
-  const modelConfig = MODELS.find((m) => m.id === requestedModel);
+  const modelConfig = (await refreshModels()).find((m) => m.id === requestedModel);
   const upstreamModel = modelConfig?.upstream || requestedModel;
 
   // Anthropic → OpenAI 消息转换
@@ -769,14 +810,15 @@ function openAItoAnthropic(openAI) {
 // 辅助
 // ---------------------------------------------------------------------------
 
-function handleModels() {
-  const list = MODELS.map((m) => ({
+async function handleModels() {
+  const list = await refreshModels();
+  const payload = list.map((m) => ({
     id: m.id,
     object: "model",
     created: Math.floor(Date.now() / 1000),
     owned_by: "cline",
   }));
-  return jsonResponse({ object: "list", data: list }, 200, { "X-Cline2api-Version": VERSION });
+  return jsonResponse({ object: "list", data: payload }, 200, { "X-Cline2api-Version": VERSION });
 }
 
 function getApiKey(request, env) {
