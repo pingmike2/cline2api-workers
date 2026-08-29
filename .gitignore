@@ -14,3 +14,5 @@ dist/
 
 # 本地测试副本（worker.js 的测试用拷贝，避免双份维护）
 test/
+.vercel
+.env*
