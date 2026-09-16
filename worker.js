@@ -202,6 +202,7 @@ function parseAccounts(env) {
       accessToken: null,
       expiry: 0,
       cooldownUntil: 0,
+      lastRefreshAt: 0,
     }));
   }
   return accounts;
@@ -217,6 +218,12 @@ async function getAccountToken(account) {
   if (account.accessToken && now < account.expiry) {
     return account.accessToken;
   }
+  // Throttle refresh attempts per account to prevent unbounded/brute-force
+  // calls against the upstream /auth/refresh endpoint.
+  if (now - (account.lastRefreshAt || 0) < 3000) {
+    throw new Error("refresh_rate_limited");
+  }
+  account.lastRefreshAt = now;
   const resp = await fetch(CLINE_API_BASE + "/auth/refresh", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
