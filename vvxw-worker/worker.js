@@ -57,12 +57,18 @@ const CONFIG = {
   // SOCKS5 请求失败时自动回退为 Worker 直连 fetch (1=启用, 0=禁用)
   // SOCKS5 仍是主路径; 仅当隧道/请求失败 (代理被限速/拦截等) 时才触发, 保证服务可用
   ALLOW_DIRECT_FALLBACK: '1',
+
+  // 首字节超时 (秒): 上游已返回响应头但迟迟不吐第一个数据块时, 主动掐断并换 Key 重试。
+  // 免费通道偶发"收下请求却不吐字"的假死, 不设此项客户端会空等到自己的 stale 阈值 (如 180s)。
+  // 填 0 表示关闭该探测。
+  FIRST_BYTE_TIMEOUT: '',
 };
 
 const DEFAULT_UPSTREAM = 'https://api.cline.bot';
 
 let socksTimeoutMs = 10_000;
 let headTimeoutMs = 30_000;
+let firstByteTimeoutMs = 45_000;
 
 const RETRYABLE_STATUS = new Set([401, 403, 407, 408, 429, 500, 502, 503, 504, 521, 522, 523, 524, 525, 526, 527]);
 
@@ -103,6 +109,61 @@ function stripMaxTokens(body) {
   }
 }
 // ============================================================
+// 首字节探测: 上游已返回响应头但迟迟不吐第一个数据块时主动掐断。
+// 免费通道 (cline-free / z-ai 等) 偶发"收下请求却不吐字"的假死: 响应头秒回 200,
+// 但 body 几分钟没有一个字节, 客户端只能空等到自己的 stale 阈值 (Hermes 默认 180s)。
+// 这里把等待压到 FIRST_BYTE_TIMEOUT, 超时即掐断连接, 交给上层换 Key 重试。
+// 只提前取出第一个 chunk, 再用新流把它接回剩余数据, 不改变响应内容。
+// ============================================================
+async function probeFirstByte(result, timeoutMs) {
+  if (!result || !result.body || !timeoutMs || timeoutMs <= 0) return result;
+  if (result.status === 204 || result.status === 304) return result;
+
+  const reader = result.body.getReader();
+  let timer = null;
+  let first;
+  try {
+    first = await Promise.race([
+      reader.read(),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`上游 ${Math.round(timeoutMs / 1000)}s 内未返回首字节 (first-byte timeout)`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } catch (err) {
+    if (timer) clearTimeout(timer);
+    try { await reader.cancel(); } catch { /* ignore */ }
+    throw err;
+  }
+  if (timer) clearTimeout(timer);
+
+  const stream = new ReadableStream({
+    start(controller) {
+      if (first.done) { controller.close(); return; }
+      if (first.value) controller.enqueue(first.value);
+      (async () => {
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            controller.enqueue(value);
+          }
+          controller.close();
+        } catch (err) {
+          try { controller.error(err); } catch { /* ignore */ }
+        }
+      })();
+    },
+    cancel(reason) {
+      try { reader.cancel(reason); } catch { /* ignore */ }
+    },
+  });
+
+  return { ...result, body: stream };
+}
+// ============================================================
 // 入口
 // ============================================================
 
@@ -131,6 +192,7 @@ async function handleRequest(request, env) {
   // 运行时超时配置
   socksTimeoutMs = intWithDefault(env.SOCKS_TIMEOUT_MS, 10_000);
   headTimeoutMs = intWithDefault(env.HEAD_TIMEOUT_MS, 30_000);
+  firstByteTimeoutMs = intWithDefault(value('FIRST_BYTE_TIMEOUT') || env.FIRST_BYTE_TIMEOUT, 45) * 1000;
 
   if (request.method === 'OPTIONS') return corsPreflight();
 
@@ -154,6 +216,7 @@ async function handleRequest(request, env) {
       require_socks5: requireSocks,
       auth_enabled: Boolean(token),
       max_retries: intWithDefault(value('MAX_RETRIES') || env.MAX_RETRIES || env.MAX_ATTEMPTS, 3),
+      first_byte_timeout_ms: firstByteTimeoutMs,
       usage: 'POST /v1/chat/completions (OpenAI 兼容, 透传上游)',
     });
   }
@@ -260,6 +323,25 @@ async function handleRequest(request, env) {
         try { await result.body?.cancel(); } catch { /* ignore */ }
         continue;
       }
+
+      // 首字节超时: 响应头已回但上游迟迟不吐数据 -> 掐断换 Key, 别让客户端空等
+      try {
+        result = await probeFirstByte(result, firstByteTimeoutMs);
+      } catch (fbErr) {
+        lastError = fbErr;
+        lastStatus = result.status;
+        console.error(`attempt ${attempt + 1}/${totalAttempts}: key #${keyIndex} ${errMsg(fbErr)}, ${isLast ? '已是最后一次尝试' : '换 Key 重试'}`);
+        if (!isLast) continue;
+        return jsonResponse({
+          success: false,
+          error: {
+            message: `${errMsg(fbErr)} (key #${keyIndex})`,
+            tried: lastTried,
+            last_status: lastStatus,
+          },
+        }, 504);
+      }
+
       console.log(`dispatch ok: key #${keyIndex}, ${fallbackUsed ? 'direct-fallback' : (viaProxy ? 'socks5 ' + proxy.hostname : 'direct')}, status ${result.status}`);
       return buildOutgoingResponse(result, { keyIndex, viaProxy: fallbackUsed ? false : viaProxy, attempt, proxy: fallbackUsed ? null : proxy, fallback: fallbackUsed });
     } catch (err) {
