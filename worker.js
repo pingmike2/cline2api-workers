@@ -438,6 +438,15 @@ async function clineFetchWithRetry(env, path, bodyObj, sessionId, isStream = fal
 // OpenAI 协议
 // ---------------------------------------------------------------------------
 
+const MAX_JSON_BODY_BYTES = 2 * 1024 * 1024; // 2MB，防止超大请求体导致的内存/CPU 耗尽 (DoS)
+
+function checkBodySize(request) {
+  const len = request.headers.get("content-length");
+  if (len && Number(len) > MAX_JSON_BODY_BYTES) {
+    throw new Error("PAYLOAD_TOO_LARGE");
+  }
+}
+
 async function handleChat(request, env) {
   // API Key 鉴权
   const key = getApiKey(request, env);
@@ -447,8 +456,12 @@ async function handleChat(request, env) {
 
   let params;
   try {
+    checkBodySize(request);
     params = await request.json();
   } catch (e) {
+    if (e.message === "PAYLOAD_TOO_LARGE") {
+      return jsonResponse({ error: { message: "Request body too large", type: "invalid_request_error" } }, 413);
+    }
     return jsonResponse({ error: { message: "Invalid JSON body", type: "parse_error" } }, 400);
   }
 
@@ -640,8 +653,12 @@ async function handleAnthropic(request, env) {
 
   let req;
   try {
+    checkBodySize(request);
     req = await request.json();
   } catch (e) {
+    if (e.message === "PAYLOAD_TOO_LARGE") {
+      return jsonResponse({ error: { message: "Request body too large", type: "invalid_request_error" } }, 413);
+    }
     return jsonResponse({ error: { message: "Invalid JSON body", type: "parse_error" } }, 400);
   }
 
